@@ -1,10 +1,10 @@
 package observatory
 
-import java.time.LocalDate
-
+import org.apache.log4j.{Level, Logger}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 
+import java.time.LocalDate
 import scala.io.Source
 
 /**
@@ -16,6 +16,14 @@ object Extraction extends ExtractionInterface {
     .appName(appName)
     .master("local")
     .getOrCreate()
+  Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
+
+  // Define case classes
+  // These need to be outside of the method where createDataFrame is called:
+  // https://intellipaat.com/community/18751/scala-spark-app-with-no-typetag-available-error-in-def-main-style-app
+  case class Station(stnIdentifier: String, wbanIdentifier: String, latitude: Double, longitude: Double)
+
+  case class TemperatureMeasurement(stnIdentifier: String, wbanIdentifier: String, month: Int, day: Int, temperatureFahrenheit: Temperature)
 
   /**
     * @param year             Year number
@@ -24,35 +32,42 @@ object Extraction extends ExtractionInterface {
     * @return A sequence containing triplets (date, location, temperature)
     */
   def locateTemperatures(year: Year, stationsFile: String, temperaturesFile: String): Iterable[(LocalDate, Location, Temperature)] = {
-    // Define column names
-    val stationColumnNames = List("STN_Identifier", "WBAN_Identifier", "Latitude", "Longitude")
-    val temperatureColumnNames = List("STN_Identifier", "WBAN_Identifier", "Month", "Day", "Temperature_F")
+    // TODO: Fix logical bug
     // Read the files
-    val stations: DataFrame = spark.read.format("csv")
-      .option("header", "false")
-      .load(stationsFile)
-      .toDF(stationColumnNames: _*)
-    val temperatures: DataFrame = spark.read.format("csv")
-      .option("header", "false")
-      .load(temperaturesFile)
-      .toDF(temperatureColumnNames: _*)
-    // Note on the "list: _*" syntax: https://stackoverflow.com/a/15034725/15052008
+    val stationBuffer = Source.fromInputStream(getClass.getResourceAsStream(stationsFile), "utf-8")
+    val temperatureBuffer = Source.fromInputStream(getClass.getResourceAsStream(temperaturesFile), "utf-8")
+    // Stream over the lines and create a list of objects
+    var stationSeq: Seq[Station] = Seq()
+    for (elem <- stationBuffer.getLines().toStream) {
+      val parts: Array[String] = elem.split(",")
+      if (parts.length > 3) // ignore stations with no known location
+        stationSeq = stationSeq :+ Station(parts(0), parts(1), parts(2).toDouble, parts(3).toDouble)
+    }
+    var temperatureSeq: Seq[TemperatureMeasurement] = Seq()
+    for (elem <- temperatureBuffer.getLines().toStream) {
+      val parts: Array[String] = elem.split(",")
+      temperatureSeq = temperatureSeq :+ TemperatureMeasurement(parts(0), parts(1), parts(2).toInt, parts(3).toInt, parts(4).toDouble)
+    }
+    // Create DataFrames
+    val stations: DataFrame = spark.createDataFrame(spark.sparkContext.parallelize(stationSeq))
+    val temperatures: DataFrame = spark.createDataFrame(spark.sparkContext.parallelize(temperatureSeq))
     // Register DataFrames as TempViews
     stations.createOrReplaceTempView("stations")
     temperatures.createOrReplaceTempView("temperatures")
     // Execute SQL query to transform data in a more convenient format
     spark.sql(
       """
-        |select t.Month, t.Day, s.Latitude, s.Longitude, ((t.Temperature_F - 32) / 1.8) as Temperature_C
+        |select t.month, t.day, s.latitude, s.longitude, ((t.temperatureFahrenheit - 32) / 1.8) as Temperature_C
         |from stations as s inner join temperatures as t
-        |on s.STN_Identifier = t.STN_Identifier and s.WBAN_Identifier = t.WBAN_Identifier
-        |where s.Latitude is not null and s.Longitude is not null""".stripMargin)
+        |on s.stnIdentifier = t.stnIdentifier and s.wbanIdentifier = t.wbanIdentifier""".stripMargin)
       .collect()
       .map {
         case Row(month: String, day: String, latitude: String, longitude: String, temperature: Double) =>
           (LocalDate.of(year, month.toInt, day.toInt), Location(lat = latitude.toDouble, lon = longitude.toDouble), temperature)
+        case Row(month: Int, day: Int, latitude: Double, longitude: Double, temperature: Double) =>
+          (LocalDate.of(year, month, day), Location(lat = latitude, lon = longitude), temperature)
       }
-      .toSeq
+      .toIterable
   }
 
   /**
@@ -70,7 +85,7 @@ object Extraction extends ExtractionInterface {
       .aggregateByKey(zeroValue = (0d, 0))(seqOp = (acc, groupedIterable) => (acc._1 + sumTemperatures(groupedIterable), acc._2 + groupedIterable.size), combOp = (acc1, acc2) => (acc1._1 + acc2._1, acc1._2 + acc2._2))
       .mapValues(x => x._1 / x._2)
       .collect()
-      .toSeq
+      .toIterable
   }
 
 }
