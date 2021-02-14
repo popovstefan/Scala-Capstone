@@ -32,7 +32,6 @@ object Extraction extends ExtractionInterface {
     * @return A sequence containing triplets (date, location, temperature)
     */
   def locateTemperatures(year: Year, stationsFile: String, temperaturesFile: String): Iterable[(LocalDate, Location, Temperature)] = {
-    // TODO: Fix logical bug
     // Read the files
     val stationBuffer = Source.fromInputStream(getClass.getResourceAsStream(stationsFile), "utf-8")
     val temperatureBuffer = Source.fromInputStream(getClass.getResourceAsStream(temperaturesFile), "utf-8")
@@ -82,7 +81,9 @@ object Extraction extends ExtractionInterface {
 
     val recordsRDD: RDD[(LocalDate, Location, Temperature)] = spark.sparkContext.parallelize(records.toSeq)
     recordsRDD.groupBy(_._2)
-      .aggregateByKey(zeroValue = (0d, 0))(seqOp = (acc, groupedIterable) => (acc._1 + sumTemperatures(groupedIterable), acc._2 + groupedIterable.size), combOp = (acc1, acc2) => (acc1._1 + acc2._1, acc1._2 + acc2._2))
+      .aggregateByKey(zeroValue = (0d, 0))(
+        seqOp = (acc, groupedIterable) => (acc._1 + sumTemperatures(groupedIterable), acc._2 + groupedIterable.size),
+        combOp = (acc1, acc2) => (acc1._1 + acc2._1, acc1._2 + acc2._2))
       .mapValues(x => x._1 / x._2)
       .collect()
       .toIterable
